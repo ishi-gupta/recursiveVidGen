@@ -16,6 +16,7 @@ type ExploreNode = {
   prompt: string;
   frameImage: string; // base64 data URI of the captured frame
   videoUrl: string;
+  parentIndex: number; // -1 = branched from root
 };
 
 export default function Home() {
@@ -34,6 +35,7 @@ export default function Home() {
 
   // Explore state
   const [exploreChain, setExploreChain] = useState<ExploreNode[]>([]);
+  const [exploreIndex, setExploreIndex] = useState(-1); // -1 = root (original videos)
   const [capturedFrame, setCapturedFrame] = useState<string | null>(null);
   const [explorePrompt, setExplorePrompt] = useState("");
   const [exploreStatus, setExploreStatus] = useState<TaskStatus>("idle");
@@ -75,6 +77,7 @@ export default function Home() {
     setStatusMessage("Preparing images...");
     setVideos(null);
     setExploreChain([]);
+    setExploreIndex(-1);
     setCapturedFrame(null);
 
     try {
@@ -174,9 +177,14 @@ export default function Home() {
         prompt: explorePrompt.trim(),
         frameImage: capturedFrame,
         videoUrl: data.videoUrl,
+        parentIndex: exploreIndex, // track which node this branched from
       };
 
-      setExploreChain((prev) => [...prev, newNode]);
+      setExploreChain((prev) => {
+        const newChain = [...prev, newNode];
+        setExploreIndex(newChain.length - 1);
+        return newChain;
+      });
       setCapturedFrame(null);
       setExplorePrompt("");
       setExploreStatus("done");
@@ -187,9 +195,9 @@ export default function Home() {
     }
   };
 
-  // Navigate breadcrumb — truncate chain to that index
+  // Navigate breadcrumb — move index without deleting nodes
   const navigateTo = (index: number) => {
-    setExploreChain((prev) => prev.slice(0, index + 1));
+    setExploreIndex(index);
     setCapturedFrame(null);
     setExplorePrompt("");
     setExploreStatus("idle");
@@ -197,19 +205,28 @@ export default function Home() {
   };
 
   const goToRoot = () => {
-    setExploreChain([]);
+    setExploreIndex(-1);
     setCapturedFrame(null);
     setExplorePrompt("");
     setExploreStatus("idle");
     setExploreMessage("");
   };
 
-  // Determine what video to show in the explore view
-  const currentExploreVideo = exploreChain.length > 0
-    ? exploreChain[exploreChain.length - 1].videoUrl
+  // Build the breadcrumb path from current node back to root
+  const breadcrumbPath: number[] = [];
+  {
+    let idx = exploreIndex;
+    while (idx >= 0) {
+      breadcrumbPath.unshift(idx);
+      idx = exploreChain[idx]?.parentIndex ?? -1;
+    }
+  }
+
+  const currentExploreVideo = exploreIndex >= 0
+    ? exploreChain[exploreIndex].videoUrl
     : null;
 
-  const isExploring = exploreChain.length > 0 || capturedFrame;
+  const isExploring = exploreIndex >= 0 || capturedFrame;
 
   return (
     <main className="min-h-screen bg-gray-950 text-white p-8">
@@ -379,18 +396,18 @@ export default function Home() {
               >
                 Original Videos
               </button>
-              {exploreChain.map((node, i) => (
-                <span key={node.id} className="flex items-center gap-2">
+              {breadcrumbPath.map((nodeIdx, i) => (
+                <span key={exploreChain[nodeIdx].id} className="flex items-center gap-2">
                   <span className="text-gray-600">/</span>
                   <button
-                    onClick={() => navigateTo(i)}
+                    onClick={() => navigateTo(nodeIdx)}
                     className={`max-w-[200px] truncate ${
-                      i === exploreChain.length - 1
+                      nodeIdx === exploreIndex
                         ? "text-white font-medium"
                         : "text-indigo-400 hover:text-indigo-300"
                     }`}
                   >
-                    {node.prompt}
+                    {exploreChain[nodeIdx].prompt}
                   </button>
                 </span>
               ))}
@@ -400,7 +417,7 @@ export default function Home() {
             {currentExploreVideo && (
               <div className="mb-6">
                 <h3 className="text-lg font-medium mb-2">
-                  {exploreChain[exploreChain.length - 1].prompt}
+                  {exploreChain[exploreIndex].prompt}
                 </h3>
                 <video
                   ref={(el) => { videoRefs.current["explore"] = el; }}
@@ -468,14 +485,14 @@ export default function Home() {
             {/* Exploration history thumbnails */}
             {exploreChain.length > 0 && (
               <div className="mt-8">
-                <h3 className="text-sm font-medium text-gray-400 mb-3">Exploration path</h3>
+                <h3 className="text-sm font-medium text-gray-400 mb-3">All explorations</h3>
                 <div className="flex gap-3 overflow-x-auto pb-2">
                   {exploreChain.map((node, i) => (
                     <button
                       key={node.id}
                       onClick={() => navigateTo(i)}
                       className={`shrink-0 rounded-lg overflow-hidden border-2 transition-colors ${
-                        i === exploreChain.length - 1 ? "border-indigo-500" : "border-gray-700 hover:border-gray-500"
+                        i === exploreIndex ? "border-indigo-500" : "border-gray-700 hover:border-gray-500"
                       }`}
                     >
                       <img
