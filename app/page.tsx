@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, ChangeEvent } from "react";
+import { useState, useRef, useCallback, ChangeEvent } from "react";
 
 type ImageSlot = {
   label: string;
@@ -10,6 +10,13 @@ type ImageSlot = {
 };
 
 type TaskStatus = "idle" | "uploading" | "generating" | "polling" | "done" | "error";
+
+type ExploreNode = {
+  id: string;
+  prompt: string;
+  frameImage: string; // base64 data URI of the captured frame
+  videoUrl: string;
+};
 
 export default function Home() {
   const [images, setImages] = useState<ImageSlot[]>([
@@ -24,6 +31,14 @@ export default function Home() {
   const [statusMessage, setStatusMessage] = useState("");
   const [videos, setVideos] = useState<{ setting: string; person: string } | null>(null);
   const fileInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  // Explore state
+  const [exploreChain, setExploreChain] = useState<ExploreNode[]>([]);
+  const [capturedFrame, setCapturedFrame] = useState<string | null>(null);
+  const [explorePrompt, setExplorePrompt] = useState("");
+  const [exploreStatus, setExploreStatus] = useState<TaskStatus>("idle");
+  const [exploreMessage, setExploreMessage] = useState("");
+  const videoRefs = useRef<{ [key: string]: HTMLVideoElement | null }>({});
 
   const handleImageSelect = (index: number, e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -59,6 +74,8 @@ export default function Home() {
     setStatus("uploading");
     setStatusMessage("Preparing images...");
     setVideos(null);
+    setExploreChain([]);
+    setCapturedFrame(null);
 
     try {
       const toDataURI = (file: File): Promise<string> =>
@@ -95,12 +112,104 @@ export default function Home() {
       const data = await res.json();
       setVideos({ setting: data.settingVideoUrl, person: data.personVideoUrl });
       setStatus("done");
-      setStatusMessage("Videos generated successfully!");
+      setStatusMessage("Videos generated successfully! Pause a video and click it to explore.");
     } catch (err: unknown) {
       setStatus("error");
       setStatusMessage(err instanceof Error ? err.message : "An error occurred");
     }
   };
+
+  // Capture the current frame from a video element
+  const captureFrame = useCallback((videoEl: HTMLVideoElement) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = videoEl.videoWidth;
+    canvas.height = videoEl.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(videoEl, 0, 0);
+    const dataUri = canvas.toDataURL("image/jpeg", 0.85);
+    setCapturedFrame(dataUri);
+    setExplorePrompt("");
+  }, []);
+
+  // Handle clicking on a video to capture frame (only when paused)
+  const handleVideoClick = useCallback((videoEl: HTMLVideoElement | null) => {
+    if (!videoEl || !videoEl.paused) return;
+    captureFrame(videoEl);
+  }, [captureFrame]);
+
+  // Submit an explore request
+  const handleExplore = async () => {
+    if (!capturedFrame || !explorePrompt.trim()) return;
+
+    setExploreStatus("generating");
+    setExploreMessage("Generating new video from this frame... This may take a few minutes.");
+
+    try {
+      const res = await fetch("/api/explore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image: capturedFrame,
+          prompt: explorePrompt.trim(),
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Explore generation failed");
+      }
+
+      setExploreStatus("polling");
+      setExploreMessage("Video is being generated... Polling for results.");
+
+      const data = await res.json();
+
+      if (!data.videoUrl) {
+        throw new Error("No video URL returned");
+      }
+
+      const newNode: ExploreNode = {
+        id: crypto.randomUUID(),
+        prompt: explorePrompt.trim(),
+        frameImage: capturedFrame,
+        videoUrl: data.videoUrl,
+      };
+
+      setExploreChain((prev) => [...prev, newNode]);
+      setCapturedFrame(null);
+      setExplorePrompt("");
+      setExploreStatus("done");
+      setExploreMessage("Exploration video generated! Pause and click to go deeper.");
+    } catch (err: unknown) {
+      setExploreStatus("error");
+      setExploreMessage(err instanceof Error ? err.message : "An error occurred");
+    }
+  };
+
+  // Navigate breadcrumb — truncate chain to that index
+  const navigateTo = (index: number) => {
+    setExploreChain((prev) => prev.slice(0, index + 1));
+    setCapturedFrame(null);
+    setExplorePrompt("");
+    setExploreStatus("idle");
+    setExploreMessage("");
+  };
+
+  const goToRoot = () => {
+    setExploreChain([]);
+    setCapturedFrame(null);
+    setExplorePrompt("");
+    setExploreStatus("idle");
+    setExploreMessage("");
+  };
+
+  // Determine what video to show in the explore view
+  const currentExploreVideo = exploreChain.length > 0
+    ? exploreChain[exploreChain.length - 1].videoUrl
+    : null;
+
+  const isExploring = exploreChain.length > 0 || capturedFrame;
 
   return (
     <main className="min-h-screen bg-gray-950 text-white p-8">
@@ -108,6 +217,7 @@ export default function Home() {
         <h1 className="text-3xl font-bold mb-2">Runway Video Generator</h1>
         <p className="text-gray-400 mb-8">
           Upload profile photos and a background image to generate cinematic videos.
+          Then explore the world by pausing and clicking on any video.
         </p>
 
         {/* Person Photos */}
@@ -213,13 +323,21 @@ export default function Home() {
         )}
 
         {/* Video Results */}
-        {videos && (
+        {videos && !isExploring && (
           <section className="mt-10">
             <h2 className="text-2xl font-semibold mb-6">Generated Videos</h2>
+            <p className="text-gray-400 text-sm mb-4">Pause a video and click on it to capture a frame and explore deeper.</p>
             <div className="grid md:grid-cols-2 gap-6">
               <div>
                 <h3 className="text-lg font-medium mb-2">Setting Pan</h3>
-                <video src={videos.setting} controls className="w-full rounded-lg bg-black" />
+                <video
+                  ref={(el) => { videoRefs.current["setting"] = el; }}
+                  src={videos.setting}
+                  controls
+                  crossOrigin="anonymous"
+                  className="w-full rounded-lg bg-black cursor-pointer"
+                  onClick={() => handleVideoClick(videoRefs.current["setting"])}
+                />
                 <a
                   href={videos.setting}
                   download="setting-video.mp4"
@@ -230,7 +348,14 @@ export default function Home() {
               </div>
               <div>
                 <h3 className="text-lg font-medium mb-2">Person Animated</h3>
-                <video src={videos.person} controls className="w-full rounded-lg bg-black" />
+                <video
+                  ref={(el) => { videoRefs.current["person"] = el; }}
+                  src={videos.person}
+                  controls
+                  crossOrigin="anonymous"
+                  className="w-full rounded-lg bg-black cursor-pointer"
+                  onClick={() => handleVideoClick(videoRefs.current["person"])}
+                />
                 <a
                   href={videos.person}
                   download="person-video.mp4"
@@ -240,6 +365,130 @@ export default function Home() {
                 </a>
               </div>
             </div>
+          </section>
+        )}
+
+        {/* Exploration View */}
+        {videos && isExploring && (
+          <section className="mt-10">
+            {/* Breadcrumb */}
+            <nav className="flex items-center gap-2 mb-6 flex-wrap text-sm">
+              <button
+                onClick={goToRoot}
+                className="text-indigo-400 hover:text-indigo-300 font-medium"
+              >
+                Original Videos
+              </button>
+              {exploreChain.map((node, i) => (
+                <span key={node.id} className="flex items-center gap-2">
+                  <span className="text-gray-600">/</span>
+                  <button
+                    onClick={() => navigateTo(i)}
+                    className={`max-w-[200px] truncate ${
+                      i === exploreChain.length - 1
+                        ? "text-white font-medium"
+                        : "text-indigo-400 hover:text-indigo-300"
+                    }`}
+                  >
+                    {node.prompt}
+                  </button>
+                </span>
+              ))}
+            </nav>
+
+            {/* Current explore video */}
+            {currentExploreVideo && (
+              <div className="mb-6">
+                <h3 className="text-lg font-medium mb-2">
+                  {exploreChain[exploreChain.length - 1].prompt}
+                </h3>
+                <video
+                  ref={(el) => { videoRefs.current["explore"] = el; }}
+                  src={currentExploreVideo}
+                  controls
+                  crossOrigin="anonymous"
+                  className="w-full max-w-2xl rounded-lg bg-black cursor-pointer"
+                  onClick={() => handleVideoClick(videoRefs.current["explore"])}
+                />
+                <p className="text-gray-400 text-sm mt-2">Pause and click to explore further.</p>
+              </div>
+            )}
+
+            {/* Captured frame + prompt input */}
+            {capturedFrame && (
+              <div className="mt-6 p-6 bg-gray-900 rounded-xl border border-gray-800">
+                <h3 className="text-lg font-semibold mb-4">Explore this moment</h3>
+                <div className="flex gap-6 flex-col md:flex-row">
+                  <div className="shrink-0">
+                    <p className="text-sm text-gray-400 mb-2">Captured frame:</p>
+                    <img
+                      src={capturedFrame}
+                      alt="Captured frame"
+                      className="w-64 rounded-lg border border-gray-700"
+                    />
+                    <button
+                      onClick={() => setCapturedFrame(null)}
+                      className="mt-2 text-sm text-red-400 hover:text-red-300"
+                    >
+                      Discard
+                    </button>
+                  </div>
+                  <div className="flex-1">
+                    <label className="block text-sm text-gray-400 mb-2">
+                      Describe what you want to explore from this frame:
+                    </label>
+                    <textarea
+                      value={explorePrompt}
+                      onChange={(e) => setExplorePrompt(e.target.value)}
+                      placeholder="e.g. Zoom into the castle in the distance, dramatic clouds rolling in..."
+                      className="w-full h-32 bg-gray-800 border border-gray-700 rounded-lg p-3 text-white placeholder-gray-500 resize-none focus:outline-none focus:border-indigo-500"
+                    />
+                    <button
+                      onClick={handleExplore}
+                      disabled={!explorePrompt.trim() || (exploreStatus !== "idle" && exploreStatus !== "done" && exploreStatus !== "error")}
+                      className="mt-3 px-6 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-700 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors"
+                    >
+                      {exploreStatus === "generating" || exploreStatus === "polling" ? "Generating..." : "Explore"}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Explore status */}
+                {exploreStatus !== "idle" && (
+                  <div className={`mt-4 p-4 rounded-lg ${exploreStatus === "error" ? "bg-red-900/50 text-red-300" : exploreStatus === "done" ? "bg-green-900/50 text-green-300" : "bg-gray-800 text-gray-300"}`}>
+                    {(exploreStatus === "generating" || exploreStatus === "polling") && (
+                      <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2 align-middle" />
+                    )}
+                    {exploreMessage}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Exploration history thumbnails */}
+            {exploreChain.length > 0 && (
+              <div className="mt-8">
+                <h3 className="text-sm font-medium text-gray-400 mb-3">Exploration path</h3>
+                <div className="flex gap-3 overflow-x-auto pb-2">
+                  {exploreChain.map((node, i) => (
+                    <button
+                      key={node.id}
+                      onClick={() => navigateTo(i)}
+                      className={`shrink-0 rounded-lg overflow-hidden border-2 transition-colors ${
+                        i === exploreChain.length - 1 ? "border-indigo-500" : "border-gray-700 hover:border-gray-500"
+                      }`}
+                    >
+                      <img
+                        src={node.frameImage}
+                        alt={node.prompt}
+                        className="w-24 h-16 object-cover"
+                      />
+                      <p className="text-xs text-gray-400 p-1 truncate w-24">{node.prompt}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
         )}
 
